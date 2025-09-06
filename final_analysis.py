@@ -1,155 +1,178 @@
-
+# -*- coding: utf-8 -*-
 import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
-import platform
-import os
 
-def set_korean_font():
-    if platform.system() == 'Windows':
-        font_name = fm.FontProperties(fname="c:/Windows/Fonts/malgun.ttf").get_name()
-        plt.rc('font', family=font_name)
-    elif platform.system() == 'Darwin':
-        plt.rc('font', family='AppleGothic')
-    else:
-        if os.path.exists('./NanumGothic-Regular.ttf'):
-            font_entry = fm.FontEntry(fname='NanumGothic-Regular.ttf', name='NanumGothic')
-            fm.fontManager.ttflist.insert(0, font_entry)
-            plt.rc('font', family='NanumGothic')
-        elif 'NanumGothic' in [f.name for f in fm.fontManager.ttflist]:
-            plt.rc('font', family='NanumGothic')
-        else:
-            print('Korean font not found... using default font.')
-            pass
-    plt.rcParams['axes.unicode_minus'] = False
+# 한글 폰트 설정을 해주는 함수에요. 그래프에 한글이 깨지지 않게 해줘요.
+def setup_korean_font():
+    """
+    그래프에 한글을 표시하기 위해 나눔고딕 폰트를 설정합니다.
+    """
+    font_path = './NanumGothic-Regular.ttf'
+    font_prop = fm.FontProperties(fname=font_path)
+    plt.rc('font', family=font_prop.get_name())
+    plt.rc('axes', unicode_minus=False)
+    return font_prop
 
-set_korean_font()
+def preprocess_data(file_path):
+    """
+    CSV 파일을 읽어와서 초지 공정과 코타 공정 데이터로 분리하고 전처리합니다.
+    - file_path: 읽어올 CSV 파일 경로
+    """
+    # CSV 파일을 읽어옵니다. (두 번째 줄을 헤더로 사용)
+    try:
+        df = pd.read_csv(file_path, encoding='cp949', header=1)
+    except UnicodeDecodeError:
+        df = pd.read_csv(file_path, encoding='utf-8', header=1)
 
-# --- 1. 데이터 로딩 및 전처리 ---
-print("---""1. 데이터 로딩 및 전처리 시작""---")
+    # 데이터 타입 오류를 방지하기 위해 컬럼들을 문자열로 변환합니다.
+    df['시간|항목'] = df['시간|항목'].astype(str)
+    df['일자'] = df['일자'].astype(str)
 
-df = pd.read_csv('week1_data.csv', encoding='cp949', header=1, thousands=',')
-df = df.drop(columns=['속도', '선압', '선압.1'], errors='ignore')
+    # 시간 문자열을 항상 4자리가 되도록 앞에 0을 채워줍니다 (예: '59' -> '0059').
+    time_str = df['시간|항목'].str.zfill(4)
+    
+    # '일자'와 포맷팅된 '시간'을 합쳐서 datetime 객체를 만듭니다.
+    df['datetime'] = pd.to_datetime(df['일자'] + ' ' + time_str, format='%Y.%m.%d %H%M', errors='coerce')
 
-df['datetime'] = pd.to_datetime(df['일자'], errors='coerce')
-df['time_str'] = df['시간|항목'].astype(str).str.zfill(4)
-df['datetime'] = df['datetime'] + pd.to_timedelta(df['time_str'].str[:2] + 'h' + df['time_str'].str[2:] + 'm', errors='coerce')
-df = df.sort_values('datetime').reset_index(drop=True)
+    # datetime 변환에 실패한 행(NaT)은 제거합니다.
+    df.dropna(subset=['datetime'], inplace=True)
 
-# --- 공정별 변수 목록 정의 ---
-# 사용자의 설명을 바탕으로, 각 공정에서만 측정되는 변수와 공통으로 측정되는 변수를 명확히 구분합니다.
+    # '속도' 컬럼의 천단위 구분기호(,)를 제거하고 숫자로 변환합니다.
+    if '속도' in df.columns:
+        df['속도'] = df['속도'].astype(str).str.replace(',', '').astype(float)
 
-# 초지 공정에서만 측정되는 변수 (원지 물성)
-choji_only_vars = ['인장강도_MD', '인열강도_MD', '지합', '투기도', '회분(배부)']
-
-# Coater 공정에서만 측정되는 변수 (코팅 및 후처리 물성)
-coater_only_vars = [
-    'BLADE_시간', 'BP평량', '도공량_THERMAL', '도공량_UNDER', '동적발색도_EPSON',
-    '동적발색_0.8msec', '동적발색_1.28msec', '정적발색_110℃', '정적발색_70℃'
-]
-
-# 양쪽 공정 모두에서 측정되는 공통 변수 (표면 특성, 광학 특성 등)
-shared_vars = [
-    '거칠음도_B', '거칠음도_T', '평활도_B', '평활도_T', '두께', '백감도', '백색도',
-    '불투명도', '색상_a', '색상_b', '색상_L', '평량'
-]
-
-# 모든 숫자 변수 목록
-all_numeric_vars = choji_only_vars + coater_only_vars + shared_vars
-for col in all_numeric_vars:
-    if col in df.columns:
+    # 숫자여야 하는 컬럼들을 숫자로 바꿔줘요.
+    numeric_cols = df.columns.drop(['작업장', '일자', '지종', '달력연도', '달력월', '시간|항목', 'datetime'], errors='ignore')
+    for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-# 공정별 데이터프레임 생성
-df_choji = df[df['작업장'] == 'PM23 초지릴'].copy()
-df_coater = df[df['작업장'] == 'CM22 코타와인더'].copy()
+    # '작업장' 컬럼을 기준으로 초지/코타 공정 데이터를 분리합니다.
+    choji_df = df[df['작업장'] == 'PM23 초지릴'].copy()
+    coater_df = df[df['작업장'] == 'CM22 코타와인더'].copy()
 
-print("데이터 로딩 및 공정별 변수 정의 완료\n")
+    # 각 공정에서 항상 비어있는 불필요한 컬럼들을 제거해요.
+    choji_df = choji_df.drop(columns=['평량', 'BLADE_시간', 'BP평량', '도공량_THERMAL', '도공량_UNDER', 
+                                     '동적발색도_EPSON', '동적발색_0.8msec', '동적발색_1.28msec', 
+                                     '정적발색_110℃', '정적발색_70℃'], errors='ignore')
+    coater_df = coater_df.drop(columns=['인열강도_MD', '인장강도_MD', '지합', '투기도', '회분(배부)'], errors='ignore')
 
+    # 분석에 사용할 컬럼만 남겨요.
+    choji_df = choji_df.set_index('datetime').select_dtypes(include=np.number).dropna(axis=1, how='all')
+    coater_df = coater_df.set_index('datetime').select_dtypes(include=np.number).dropna(axis=1, how='all')
+    
+    return choji_df, coater_df
 
-# --- 2. 공정 내 변수 관계 분석 (Intra-process) ---
-print("---""2. 공정 내 변수 관계 분석 시작""---")
+def plot_intra_process_correlation(df, title, filename):
+    """
+    공정 내 변수들 간의 상관관계를 히트맵으로 그려주는 함수에요.
+    """
+    if df.empty or df.shape[1] < 2:
+        print(f"'{title}'에 대한 데이터가 부족하여 그래프를 생성할 수 없습니다.")
+        return
 
-# 초지 공정 분석 (초지 고유 변수 + 공통 변수)
-choji_analysis_vars = choji_only_vars + shared_vars
-choji_corr = df_choji[choji_analysis_vars].corr()
-plt.figure(figsize=(18, 16))
-sns.heatmap(choji_corr, annot=True, fmt='.2f', cmap='coolwarm', annot_kws={"size": 8})
-plt.title('초지 공정 변수 간 상관관계 분석 (최종)', fontsize=20)
-plt.savefig('final_task1_choji_correlation.png', dpi=300)
-plt.close()
-print("초지 공정 상관관계 히트맵 저장 완료: final_task1_choji_correlation.png")
+    corr_matrix = df.corr()
+    
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm', linewidths=.5)
+    plt.title(title, fontsize=16)
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    plt.savefig(filename)
+    plt.close()
+    print("'" + filename + "' 파일로 공정 내 상관관계 히트맵을 저장했습니다.")
 
-# Coater 공정 분석 (Coater 고유 변수 + 공통 변수)
-coater_analysis_vars = coater_only_vars + shared_vars
-coater_corr = df_coater[coater_analysis_vars].corr()
-plt.figure(figsize=(20, 18))
-sns.heatmap(coater_corr, annot=True, fmt='.2f', cmap='coolwarm', annot_kws={"size": 8})
-plt.title('Coater 공정 변수 간 상관관계 분석 (최종)', fontsize=20)
-plt.savefig('final_task1_coater_correlation.png', dpi=300)
-plt.close()
-print("Coater 공정 상관관계 히트맵 저장 완료: final_task1_coater_correlation.png")
-print("공정 내 분석 완료\n")
+def plot_coater_impact_analysis(coater_df, filename_prefix):
+    """
+    코타 공정에서 도공량과 BLADE 시간이 다른 변수에 미치는 영향을 산점도로 분석해요.
+    """
+    if coater_df.empty:
+        print("코타 공정 데이터가 비어있어 영향 분석을 수행할 수 없습니다.")
+        return
 
+    impact_factors = ['도공량_THERMAL', '도공량_UNDER', 'BLADE_시간']
+    target_qualities = ['평활도_B', '거칠음도_B', '백색도', '동적발색도_EPSON']
 
-# --- 3. 도공량/Blade 시간의 영향 분석 ---
-print("---""3. 도공량/Blade 시간의 영향 분석 시작""---")
+    for factor in impact_factors:
+        if factor not in coater_df.columns:
+            continue
+        
+        plt.figure(figsize=(20, 5))
+        for i, quality in enumerate(target_qualities):
+            if quality not in coater_df.columns:
+                continue
+            
+            plt.subplot(1, 4, i + 1)
+            sns.regplot(x=factor, y=quality, data=coater_df, scatter_kws={'alpha':0.3})
+            plt.title(factor + '과 ' + quality + '의 관계')
+        
+        plt.tight_layout()
+        filename = filename_prefix + "_" + factor + "_impact.png"
+        plt.savefig(filename)
+        plt.close()
+        print("'" + filename + "' 파일로 영향 분석 그래프를 저장했습니다.")
 
-# Coater 공정의 제어 인자
-coater_control_vars = ['도공량_UNDER', '도공량_THERMAL', 'BLADE_시간']
-# 제어 인자가 영향을 미치는 결과 변수들 (공통 변수)
-coater_result_vars = shared_vars
+def plot_inter_process_influence(choji_df, coater_df, filename):
+    """
+    초지 공정이 코타 공정에 미치는 영향을 시차를 고려하여 분석하고 히트맵으로 그려요.
+    """
+    if choji_df.empty or coater_df.empty:
+        print("초지 또는 코타 공정 데이터가 비어있어 공정 간 영향 분석을 수행할 수 없습니다.")
+        return
 
-# 제어 인자와 결과 변수들 간의 상관관계만 추출
-impact_corr = df_coater[coater_control_vars + coater_result_vars].corr().loc[coater_result_vars, coater_control_vars]
+    choji_daily = choji_df.resample('D').mean()
+    coater_daily = coater_df.resample('D').mean()
+    choji_shifted = choji_daily.shift(1)
+    merged_df = pd.merge(choji_shifted, coater_daily, left_index=True, right_index=True, suffixes=('_초지', '_코타'))
+    
+    if merged_df.empty or merged_df.shape[0] < 2:
+        print("시차 적용 후 데이터가 부족하여 공정 간 영향 분석을 수행할 수 없습니다.")
+        return
 
-plt.figure(figsize=(10, 8))
-sns.heatmap(impact_corr, annot=True, fmt='.2f', cmap='viridis')
-plt.title('Coater 공정: 제어 인자가 품질에 미치는 영향 (최종)', fontsize=16)
-plt.savefig('final_task2_coater_impact.png', dpi=300)
-plt.close()
-print("Coater 공정의 제어 인자 영향 분석 히트맵 저장 완료: final_task2_coater_impact.png")
-print("제어 인자 영향 분석 완료\n")
+    choji_cols = [col for col in merged_df.columns if '_초지' in col]
+    coater_cols = [col for col in merged_df.columns if '_코타' in col]
+    coater_top_cols = [col for col in coater_cols if 'Top' in col or '평활도' in col or '거칠음도' in col or '백색도' in col or '동적발색도' in col]
+    
+    if not coater_top_cols:
+        coater_top_cols = coater_cols
 
+    cross_corr = merged_df[choji_cols + coater_top_cols].corr().loc[coater_top_cols, choji_cols]
 
-# --- 4. 초지 공정이 Coater 공정에 미치는 영향 분석 (Inter-process) ---
-print("---""4. 초지 -> Coater 공정 영향 분석 시작""---")
+    plt.figure(figsize=(14, 12))
+    sns.heatmap(cross_corr, annot=True, fmt='.2f', cmap='viridis', linewidths=.5)
+    plt.title('초지 공정이 코타 공정에 미치는 영향 (1일 시차 적용)', fontsize=16)
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    plt.savefig(filename)
+    plt.close()
+    print("'" + filename + "' 파일로 공정 간 영향 분석 히트맵을 저장했습니다.")
 
-# 초지에서 측정된 모든 변수
-choji_all_vars_for_merge = choji_only_vars + shared_vars + ['datetime']
-# Coater에서 측정된 모든 변수
-coater_all_vars_for_merge = coater_only_vars + shared_vars + ['datetime']
+def main():
+    """
+    메인 실행 함수
+    """
+    setup_korean_font()
 
-# merge_asof를 사용하여 시간 기반으로 두 공정 데이터 병합
-merged_df = pd.merge_asof(
-    df_coater[coater_all_vars_for_merge],
-    df_choji[choji_all_vars_for_merge],
-    on='datetime',
-    direction='backward',
-    suffixes=('_코타', '_초지')
-)
+    print("데이터를 전처리하고 있습니다...")
+    choji_df, coater_df = preprocess_data('week1_data.csv')
+    print("데이터 전처리가 완료되었습니다.")
 
-# 영향 분석을 위한 최종 변수 목록 생성
-choji_influence_vars = [col + '_초지' for col in (choji_only_vars + shared_vars)]
-coater_quality_vars = [col + '_코타' for col in (coater_only_vars + shared_vars)]
+    print("\n[Task 1] 공정 내 변수들의 관계를 분석합니다...")
+    plot_intra_process_correlation(choji_df, '초지 공정 내 변수들의 상관관계', 'task1_choji_intra_correlation.png')
+    plot_intra_process_correlation(coater_df, '코타 공정 내 변수들의 상관관계', 'task1_coater_intra_correlation.png')
 
-# 일부 변수는 이름이 겹치지 않아 접미사가 붙지 않으므로, 실제 존재하는 컬럼명으로 보정
-choji_influence_vars_final = [v for v in choji_influence_vars if v in merged_df.columns]
-coater_quality_vars_final = [v for v in coater_quality_vars if v in merged_df.columns]
+    print("\n[Task 2] 코타 공정의 주요 인자가 품질에 미치는 영향을 분석합니다...")
+    plot_coater_impact_analysis(coater_df, 'task2_coater')
 
-# 초지 변수 vs 코타 변수 간의 상관관계 계산
-cross_corr = merged_df[choji_influence_vars_final + coater_quality_vars_final].corr()
-cross_corr_filtered = cross_corr.loc[coater_quality_vars_final, choji_influence_vars_final]
+    print("\n[Task 3] 초지 공정이 코타 공정에 미치는 영향을 분석합니다...")
+    plot_inter_process_influence(choji_df, coater_df, 'task3_choji_to_coater_influence.png')
+    
+    print("\n모든 분석 및 시각화가 완료되었습니다!")
+    print("생성된 파일: task1_choji_intra_correlation.png, task1_coater_intra_correlation.png, task2_coater_..._impact.png, task3_choji_to_coater_influence.png")
 
-plt.figure(figsize=(24, 22))
-sns.heatmap(cross_corr_filtered, annot=True, fmt='.2f', cmap='coolwarm', annot_kws={"size": 8})
-plt.title('초지 공정 변수가 Coater 공정 변수에 미치는 영향 (최종)', fontsize=20)
-plt.xticks(rotation=45, ha='right')
-plt.yticks(rotation=0)
-plt.tight_layout()
-plt.savefig('final_task3_choji_to_coater_influence.png', dpi=300)
-plt.close()
-print("초지->Coater 공정 영향 분석 히트맵 저장 완료: final_task3_choji_to_coater_influence.png")
-print("모든 분석이 완료되었습니다.")
+if __name__ == '__main__':
+    main()
